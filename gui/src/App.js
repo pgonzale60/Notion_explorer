@@ -2,13 +2,15 @@ import React, { useEffect, useState } from "react";
 import { 
   Container, Typography, List, ListItem, ListItemText, Box, Paper, Stack, Divider, Card, CardContent, Chip, 
   FormControl, InputLabel, Select, MenuItem, IconButton, Tooltip, Badge, Tab, Tabs,
-  FormGroup, FormControlLabel, Switch, CircularProgress
+  FormGroup, FormControlLabel, Switch, CircularProgress, OutlinedInput, Checkbox, ListItemIcon,
+  Button, Dialog, DialogTitle, DialogContent, DialogActions
 } from "@mui/material";
 import SortIcon from "@mui/icons-material/Sort";
 import FilterListIcon from "@mui/icons-material/FilterList";
 import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
 import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
 import InfoIcon from "@mui/icons-material/Info";
+import FilterAltIcon from '@mui/icons-material/FilterAlt';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -17,16 +19,21 @@ function App() {
   // Data states
   const [notes, setNotes] = useState([]);
   const [answersIndex, setAnswersIndex] = useState({}); // noteId -> true if has answers
+  const [noteVersionsIndex, setNoteVersionsIndex] = useState({}); // noteId -> [versions]
   const [selectedNote, setSelectedNote] = useState(null);
   const [answers, setAnswers] = useState([]);
-  const [questionVersions, setQuestionVersions] = useState(["v1", "v2", "v3"]); // Initialize with default values
+  const [questionVersions, setQuestionVersions] = useState([]); // Available question versions from DB
+  const [selectedVersions, setSelectedVersions] = useState([]); // Selected versions to display
   const [questions, setQuestions] = useState({}); // Format: { "v1": [question1, question2, ...], "v2": [...] }
   const [isLoadingQuestions, setIsLoadingQuestions] = useState(true);
+  const [latestVersion, setLatestVersion] = useState(null); // Latest version
   
   // Filter states
   const [contentFilter, setContentFilter] = useState(false);
   const [analysisFilter, setAnalysisFilter] = useState(false);
   const [versionFilter, setVersionFilter] = useState("any");
+  const [versionFilterSelections, setVersionFilterSelections] = useState([]); // For multiselect version filtering
+  const [filterDialogOpen, setFilterDialogOpen] = useState(false);
   
   // Sort states
   const [sortDirection, setSortDirection] = useState("desc"); // "asc" or "desc"
@@ -51,7 +58,12 @@ function App() {
         setAnswersIndex(idx);
       });
     
-    // Fetch available question versions from the questions directory
+    // Fetch note versions index (mapping of note_id -> list of versions)
+    fetch("http://localhost:8000/note_versions_index")
+      .then((res) => res.json())
+      .then(setNoteVersionsIndex);
+    
+    // Fetch available question versions from the database
     fetchQuestionVersions();
   }, []);
   
@@ -60,27 +72,30 @@ function App() {
     setIsLoadingQuestions(true);
     
     try {
-      // First, get all question version files
-      const response = await fetch("http://localhost:8000/question_files");
+      // First, get all question versions from the database API
+      const versionsResponse = await fetch("http://localhost:8000/question_versions");
       
-      if (!response.ok) {
-        throw new Error("Failed to fetch question files");
+      if (!versionsResponse.ok) {
+        throw new Error("Failed to fetch question versions");
       }
       
-      const files = await response.json();
+      const versionData = await versionsResponse.json();
       
-      // Extract version numbers from filenames (e.g., "questions_v1.json" -> "v1")
-      const versions = files
-        .filter(file => file.match(/questions_v\d+\.json/))
-        .map(file => {
-          const match = file.match(/questions_v(\d+)\.json/);
-          return match ? `v${match[1]}` : null;
-        })
-        .filter(Boolean);
-        
+      // Extract version strings
+      const versions = versionData.map(v => v.version);
       setQuestionVersions(versions);
       
-      // Next, load questions for each version
+      // Get the latest version
+      const latestResponse = await fetch("http://localhost:8000/latest_question_version");
+      if (latestResponse.ok) {
+        const latestData = await latestResponse.json();
+        const latest = latestData.version;
+        setLatestVersion(latest);
+        // Set the latest version as the default selected version
+        setSelectedVersions(latest ? [latest] : []);
+      }
+      
+      // Load questions for each version
       const questionsMap = {};
       
       for (const version of versions) {
@@ -103,8 +118,10 @@ function App() {
       console.error("Error fetching question versions:", error);
       
       // Fallback: Use hardcoded question versions if API fails
-      const fallbackVersions = ["v1", "v2", "v3"];
+      const fallbackVersions = ["v1", "v2", "v3", "v4"];
       setQuestionVersions(fallbackVersions);
+      setLatestVersion("v4");
+      setSelectedVersions(["v4"]);
       
       // Attempt to fetch individual question files directly as a fallback
       const questionsMap = {};
@@ -175,6 +192,35 @@ function App() {
     }
   };
 
+  // Handle version selection
+  const handleVersionChange = (event) => {
+    const { value } = event.target;
+    setSelectedVersions(Array.isArray(value) ? value : [value]);
+  };
+  
+  // Handle version filter change
+  const handleVersionFilterChange = (event) => {
+    setVersionFilter(event.target.value);
+  };
+
+  // Handle open/close filter dialog
+  const openFilterDialog = () => {
+    setFilterDialogOpen(true);
+  };
+
+  const closeFilterDialog = () => {
+    setFilterDialogOpen(false);
+  };
+
+  // Handle version filter selection in dialog
+  const handleFilterVersionSelectionChange = (event) => {
+    setVersionFilterSelections(event.target.value);
+  };
+
+  const applyVersionFilter = () => {
+    closeFilterDialog();
+  };
+  
   const selectNote = (note) => {
     setSelectedNote(note);
     fetch(`http://localhost:8000/answers/${note.id}`)
@@ -200,500 +246,492 @@ function App() {
     // Step 1: Filter notes
     let filtered = [...notes];
     
-    // Content filter
+    // Apply content filter
     if (contentFilter) {
-      filtered = filtered.filter(note => 
-        note.content && note.content.trim() !== ""
-      );
+      filtered = filtered.filter((note) => note.content && note.content.trim().length > 0);
     }
     
-    // Analysis filter
+    // Apply analysis filter
     if (analysisFilter) {
-      filtered = filtered.filter(note => answersIndex[note.id]);
+      filtered = filtered.filter((note) => answersIndex[note.id]);
     }
-    
-    // Version filter (would need to enhance the backend API)
+
+    // Apply version filter if specific version is selected
     if (versionFilter !== "any") {
-      // This is a placeholder - the actual implementation would require
-      // a backend endpoint that provides version info per note
-      // For now, we just keep the UI ready
+      filtered = filtered.filter((note) => {
+        // Check if this note has answers for the selected version
+        return noteVersionsIndex[note.id]?.includes(versionFilter);
+      });
+    }
+    // Apply version filter selections (from the filter dialog)
+    else if (versionFilterSelections.length > 0) {
+      filtered = filtered.filter((note) => {
+        // Check if this note has answers for any of the selected versions
+        return versionFilterSelections.some(version => 
+          noteVersionsIndex[note.id]?.includes(version)
+        );
+      });
     }
     
-    // Step 2: Sort notes by last_edited_time
-    return filtered.sort((a, b) => {
-      // Handle missing dates
-      if (!a.last_edited_time) return sortDirection === "asc" ? -1 : 1;
-      if (!b.last_edited_time) return sortDirection === "asc" ? 1 : -1;
+    // Step 2: Sort notes (by last_edited_time)
+    filtered.sort((a, b) => {
+      const timeA = new Date(a.last_edited_time || 0).getTime();
+      const timeB = new Date(b.last_edited_time || 0).getTime();
       
-      // Compare dates
-      const dateA = new Date(a.last_edited_time);
-      const dateB = new Date(b.last_edited_time);
-      
-      if (sortDirection === "asc") {
-        return dateA - dateB;
-      } else {
-        return dateB - dateA;
-      }
+      return sortDirection === "asc" ? timeA - timeB : timeB - timeA;
     });
-  }, [notes, contentFilter, analysisFilter, versionFilter, sortDirection, answersIndex]);
+    
+    return filtered;
+  }, [notes, contentFilter, analysisFilter, sortDirection, answersIndex, versionFilterSelections, versionFilter, noteVersionsIndex]);
 
-  // Extract title from note content (first line without the # prefix)
-  const getNoteTitle = (content) => {
-    if (!content) return "Untitled";
-    const firstLine = content.split('\n')[0];
-    return firstLine.replace(/^#+\s*/, '').trim() || "Untitled";
-  };
-
-  // Format date for display
-  const formatDate = (dateString) => {
-    if (!dateString) return "N/A";
+  // Get formatted date for display
+  const getFormattedDate = (dateString) => {
+    if (!dateString) return "Unknown date";
     const date = new Date(dateString);
-    return date.toLocaleString(undefined, { 
-      year: 'numeric', 
-      month: 'short', 
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
+    return date.toLocaleDateString("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
     });
   };
-  
-  // Get question text for an answer key (e.g., "q1" -> "What positive emotions were mentioned?")
-  const getQuestionForKey = (key, version) => {
-    if (!version) return "Unknown question";
+
+  // Get question text for a specific version and question number
+  const getQuestionText = (version, questionNumber) => {
+    // Convert from 1-based to 0-based index
+    const idx = parseInt(questionNumber.replace("q", "")) - 1;
     
-    // Remove 'v' prefix if present to normalize version format
-    const versionKey = version.replace(/^v/, '');
-    
-    // Extract the number from the key (e.g., "q1" -> 1)
-    const match = key.match(/q(\d+)/);
-    if (!match) return "Unknown question";
-    
-    const questionIndex = parseInt(match[1], 10) - 1;
-    
-    // Get questions for this version
-    const versionQuestions = questions[`v${versionKey}`] || [];
-    
-    // Return the question if it exists, otherwise a fallback message
-    if (questionIndex >= 0 && questionIndex < versionQuestions.length) {
-      return versionQuestions[questionIndex];
+    if (questions[version] && questions[version][idx]) {
+      return questions[version][idx];
     }
     
     return "Question not found";
   };
 
+  // Get unique answer versions for the current note
+  const answerVersions = Array.from(new Set(answers.map((a) => a.questions_version))).sort((a, b) => {
+    // Sort versions in descending order (newest to oldest)
+    // Assuming format vX where X is a number
+    const numA = parseInt(a.replace("v", ""));
+    const numB = parseInt(b.replace("v", ""));
+    return numB - numA;
+  });
+
+  // Determine if answers for a specific version exist
+  const hasAnswersForVersion = (version) => {
+    return answers.some((a) => a.questions_version === version);
+  };
+
+  // Get versions to display based on current selection
+  const versionsToDisplay = React.useMemo(() => {
+    if (versionFilter === "any") {
+      // When "Any version" is selected, check if there are version filter selections
+      if (versionFilterSelections.length > 0) {
+        // Only show selected versions from the filter dialog
+        return answerVersions.filter(v => versionFilterSelections.includes(v));
+      }
+      // Otherwise show all versions from newest to oldest
+      return answerVersions;
+    } else {
+      // When a specific version is selected in the dropdown
+      return [versionFilter];
+    }
+  }, [versionFilter, versionFilterSelections, answerVersions]);
+
+  // Sort questionVersions from newest to oldest for display in the filter dialog
+  const sortedQuestionVersions = React.useMemo(() => {
+    return [...questionVersions].sort((a, b) => {
+      const numA = parseInt(a.replace("v", ""));
+      const numB = parseInt(b.replace("v", ""));
+      return numB - numA;
+    });
+  }, [questionVersions]);
+
   return (
-    <Container maxWidth="lg" sx={{ paddingTop: 3, paddingBottom: 3 }}>
-      <Typography variant="h4" gutterBottom sx={{ fontWeight: 'medium' }}>Notion Notes Explorer</Typography>
-      
+    <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+      <Typography variant="h4" gutterBottom>
+        Notion Theme Explorer
+      </Typography>
+
       {/* Filters and Controls */}
       <Paper 
         elevation={1} 
         sx={{ 
           p: 2, 
-          mb: 3, 
-          borderRadius: 2,
-          backgroundColor: '#f8f9fa'
+          mb: 2, 
+          display: 'flex', 
+          flexDirection: { xs: 'column', sm: 'row' }, 
+          justifyContent: 'space-between',
+          alignItems: { xs: 'flex-start', sm: 'center' },
+          gap: 2
         }}
       >
-        <Stack 
-          direction={{ xs: 'column', sm: 'row' }} 
-          spacing={3} 
-          alignItems={{ xs: 'flex-start', sm: 'center' }}
-          justifyContent="space-between"
-          flexWrap="wrap"
-        >
-          {/* Left section - Sort controls */}
-          <Stack direction="row" spacing={2} alignItems="center">
-            <Box sx={{ display: 'flex', alignItems: 'center' }}>
-              <Typography variant="subtitle2" sx={{ mr: 1 }}>
-                <SortIcon fontSize="small" sx={{ verticalAlign: 'middle', mr: 0.5 }} />
-                Sort:
-              </Typography>
-              <Tooltip title={sortDirection === "asc" ? "Oldest first" : "Newest first"}>
-                <IconButton 
-                  onClick={toggleSortDirection} 
-                  size="small" 
-                  color="primary"
-                  sx={{ border: '1px solid', borderColor: 'primary.main', borderRadius: 1 }}
-                >
-                  {sortDirection === "asc" ? <ArrowUpwardIcon fontSize="small" /> : <ArrowDownwardIcon fontSize="small" />}
-                </IconButton>
-              </Tooltip>
+        {/* Sort Control */}
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <Typography variant="subtitle2" component="span">
+            <Box component="span" sx={{ display: 'flex', alignItems: 'center' }}>
+              <SortIcon fontSize="small" sx={{ mr: 0.5 }} /> Sort:
             </Box>
-          </Stack>
-          
-          {/* Right section - Filter controls */}
-          <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap">
-            <Typography variant="subtitle2">
-              <FilterListIcon fontSize="small" sx={{ verticalAlign: 'middle', mr: 0.5 }} />
-              Filters:
-            </Typography>
-            
-            <FormGroup row>
-              <FormControlLabel 
-                control={
-                  <Switch 
-                    size="small" 
-                    checked={contentFilter}
-                    onChange={(e) => setContentFilter(e.target.checked)}
-                  />
-                } 
-                label={<Typography variant="body2">Has Content</Typography>}
-              />
-              
-              <FormControlLabel 
-                control={
-                  <Switch 
-                    size="small" 
-                    checked={analysisFilter}
-                    onChange={(e) => setAnalysisFilter(e.target.checked)}
-                  />
-                } 
-                label={<Typography variant="body2">Has Analysis</Typography>}
-              />
-            </FormGroup>
-            
-            <FormControl variant="outlined" size="small" sx={{ minWidth: 150 }}>
-              <InputLabel id="version-filter-label">Question Version</InputLabel>
-              <Select
-                labelId="version-filter-label"
-                value={versionFilter}
-                label="Question Version"
-                onChange={(e) => setVersionFilter(e.target.value)}
-                sx={{ height: 40 }}
-                disabled={isLoadingQuestions}
-              >
-                <MenuItem value="any">Any Version</MenuItem>
-                {Array.isArray(questionVersions) && questionVersions.map(version => (
-                  <MenuItem key={version} value={version}>{version}</MenuItem>
-                ))}
-              </Select>
-              {isLoadingQuestions && (
-                <CircularProgress 
-                  size={16} 
-                  sx={{ ml: 1, position: 'absolute', right: 32, top: '50%', transform: 'translateY(-50%)' }}
+          </Typography>
+          <IconButton 
+            size="small" 
+            onClick={toggleSortDirection}
+            sx={{ 
+              border: '1px solid rgba(0, 0, 0, 0.23)', 
+              borderRadius: 1,
+              p: 1
+            }}
+          >
+            {sortDirection === "asc" ? <ArrowUpwardIcon /> : <ArrowDownwardIcon />}
+          </IconButton>
+        </Stack>
+
+        {/* Filters */}
+        <Stack direction="row" alignItems="center" spacing={2}>
+          <Typography variant="subtitle2" component="span">
+            <Box component="span" sx={{ display: 'flex', alignItems: 'center' }}>
+              <FilterListIcon fontSize="small" sx={{ mr: 0.5 }} /> Filters:
+            </Box>
+          </Typography>
+
+          <FormGroup row>
+            <FormControlLabel
+              control={
+                <Switch
+                  size="small"
+                  checked={contentFilter}
+                  onChange={(e) => setContentFilter(e.target.checked)}
+                />
+              }
+              label="Has Content"
+            />
+
+            <FormControlLabel
+              control={
+                <Switch
+                  size="small"
+                  checked={analysisFilter}
+                  onChange={(e) => setAnalysisFilter(e.target.checked)}
+                />
+              }
+              label="Has Analysis"
+            />
+          </FormGroup>
+
+          {/* Version Filter Dropdown */}
+          <FormControl sx={{ minWidth: 120 }} size="small">
+            <InputLabel id="question-version-label">Question Version</InputLabel>
+            <Select
+              labelId="question-version-label"
+              id="question-version-select"
+              value={versionFilter}
+              label="Question Version"
+              onChange={handleVersionFilterChange}
+            >
+              <MenuItem value="any">Any Version</MenuItem>
+              {sortedQuestionVersions.map((version) => (
+                <MenuItem key={`version-${version}`} value={version}>
+                  {version}
+                  {version === latestVersion && " (Latest)"}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+
+          {/* Version Filter Button */}
+          <Tooltip title="Filter notes by version">
+            <IconButton onClick={openFilterDialog} sx={{ ml: 1 }}>
+              <FilterAltIcon />
+              {versionFilterSelections.length > 0 && (
+                <Badge 
+                  color="primary" 
+                  badgeContent={versionFilterSelections.length} 
+                  sx={{ position: 'absolute', top: -5, right: -5 }}
                 />
               )}
-            </FormControl>
-          </Stack>
+            </IconButton>
+          </Tooltip>
         </Stack>
       </Paper>
-      
-      {/* Main content area */}
-      <Box sx={{ display: "flex", gap: 3 }}>
-        {/* Note list panel */}
-        <Paper sx={{ 
-          flex: 1, 
-          maxWidth: 350,
-          maxHeight: 'calc(100vh - 220px)', 
-          overflow: "auto", 
-          boxShadow: 2,
-          borderRadius: 2
-        }}>
-          <Box sx={{ 
-            p: 2, 
-            backgroundColor: '#f5f5f5', 
-            borderBottom: '1px solid #e0e0e0',
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center'
-          }}>
-            <Typography variant="h6">Notes</Typography>
-            <Badge 
-              badgeContent={processedNotes.length} 
-              color="primary"
-              sx={{ '& .MuiBadge-badge': { fontSize: '0.8rem' } }}
+
+      {/* Version Filter Dialog */}
+      <Dialog open={filterDialogOpen} onClose={closeFilterDialog}>
+        <DialogTitle>Filter Notes by Question Version</DialogTitle>
+        <DialogContent>
+          <FormControl sx={{ mt: 2, width: '100%', minWidth: 200 }}>
+            <InputLabel id="version-filter-select-label">Filter Versions</InputLabel>
+            <Select
+              labelId="version-filter-select-label"
+              id="version-filter-select"
+              multiple
+              value={versionFilterSelections}
+              onChange={handleFilterVersionSelectionChange}
+              input={<OutlinedInput label="Filter Versions" />}
+              renderValue={(selected) => (
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                  {selected.map((value) => (
+                    <Chip key={value} label={value} />
+                  ))}
+                </Box>
+              )}
             >
-              <Typography variant="body2" color="text.secondary">Showing</Typography>
-            </Badge>
+              {sortedQuestionVersions.map((version) => (
+                <MenuItem key={`filter-${version}`} value={version}>
+                  <Checkbox checked={versionFilterSelections.indexOf(version) > -1} />
+                  <ListItemText 
+                    primary={version} 
+                    secondary={version === latestVersion ? "Latest" : ""}
+                  />
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Typography variant="caption" sx={{ display: 'block', mt: 1 }}>
+            Only show notes that have answers for the selected versions
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeFilterDialog}>Cancel</Button>
+          <Button onClick={applyVersionFilter} variant="contained" color="primary">
+            Apply Filter
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Box sx={{ display: 'flex', flexDirection: { xs: 'column', md: 'row' }, gap: 2 }}>
+        {/* Left Panel: Note List */}
+        <Paper sx={{ width: { xs: '100%', md: '30%' }, height: 'calc(100vh - 200px)', overflow: 'auto' }}>
+          <Box sx={{ p: 2, borderBottom: '1px solid rgba(0, 0, 0, 0.12)' }}>
+            <Typography variant="h6">
+              Notes
+              <Typography variant="caption" sx={{ ml: 1 }}>
+                Showing: {processedNotes.length}
+              </Typography>
+            </Typography>
           </Box>
           
-          {processedNotes.length === 0 ? (
-            <Box sx={{ p: 3, textAlign: 'center' }}>
-              <Typography color="text.secondary">No notes match your filters</Typography>
-            </Box>
-          ) : (
-            <List sx={{ p: 0 }}>
-              {processedNotes.map((note) => (
-                <React.Fragment key={note.id}>
-                  <ListItem 
-                    button 
-                    onClick={() => selectNote(note)} 
-                    selected={selectedNote && selectedNote.id === note.id}
-                    sx={{ 
-                      px: 2, 
-                      py: 1.5,
-                      '&.Mui-selected': {
-                        backgroundColor: '#e3f2fd'
-                      },
-                      '&:hover': {
-                        backgroundColor: '#f5f5f5'
-                      }
-                    }}
-                  >
-                    <ListItemText
-                      primary={getNoteTitle(note.content)}
-                      secondary={
-                        <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', fontSize: '0.7rem' }}>
-                          {formatDate(note.last_edited_time)}
-                        </Typography>
-                      }
-                      primaryTypographyProps={{
-                        noWrap: true,
-                        style: { fontWeight: 500 }
-                      }}
-                    />
-                    {answersIndex[note.id] && (
-                      <Chip 
-                        size="small" 
-                        label="Analyzed" 
-                        sx={{ ml: 1, fontSize: '0.7rem', height: 20 }} 
-                        color="primary" 
-                        variant="outlined" 
-                      />
-                    )}
-                  </ListItem>
-                  <Divider component="li" />
-                </React.Fragment>
-              ))}
-            </List>
-          )}
+          <List sx={{ p: 0 }}>
+            {processedNotes.map((note) => (
+              <ListItem
+                key={note.id}
+                alignItems="flex-start"
+                sx={{
+                  cursor: 'pointer',
+                  borderLeft: selectedNote?.id === note.id ? '4px solid #1976d2' : '4px solid transparent',
+                  backgroundColor: selectedNote?.id === note.id ? 'rgba(25, 118, 210, 0.08)' : 'transparent',
+                  '&:hover': {
+                    backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                  },
+                  transition: 'all 0.2s',
+                }}
+                onClick={() => selectNote(note)}
+              >
+                <ListItemText
+                  primary={
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <Typography variant="subtitle1" 
+                        sx={{ 
+                          fontWeight: selectedNote?.id === note.id ? 'bold' : 'normal',
+                          maxWidth: '70%',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {/* Extract title from first line of content or use ID */}
+                        {note.content 
+                          ? note.content.split('\n')[0].substr(0, 40) 
+                          : note.id.substr(0, 10) + '...'}
+                      </Typography>
+                      
+                      {answersIndex[note.id] && (
+                        <Chip 
+                          label="Analyzed" 
+                          size="small" 
+                          color="primary" 
+                          variant="outlined" 
+                          sx={{ fontSize: '0.7rem' }}
+                        />
+                      )}
+                    </Box>
+                  }
+                  secondary={
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                    >
+                      {getFormattedDate(note.last_edited_time)}
+                    </Typography>
+                  }
+                />
+              </ListItem>
+            ))}
+          </List>
         </Paper>
-        
-        {/* Note detail panel */}
-        <Paper sx={{ 
-          flex: 2, 
-          p: 0, 
-          maxHeight: 'calc(100vh - 220px)', 
-          overflow: "auto",
-          boxShadow: 2,
-          borderRadius: 2
-        }}>
+
+        {/* Right Panel: Details */}
+        <Box sx={{ width: { xs: '100%', md: '70%' } }}>
           {selectedNote ? (
             <>
-              {/* Header with title and metadata */}
-              <Box sx={{ p: 3, borderBottom: '1px solid #e0e0e0', backgroundColor: '#f9f9f9' }}>
-                <Typography variant="h6">{getNoteTitle(selectedNote.content)}</Typography>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', mt: 1 }}>
-                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                    ID: {selectedNote.id}
-                  </Typography>
-                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                    Created: {formatDate(selectedNote.created_time)} | Last Edited: {formatDate(selectedNote.last_edited_time)}
-                  </Typography>
-                </Box>
-              </Box>
+              {/* Tabs for switching views */}
+              <Tabs value={activeTab} onChange={handleTabChange} sx={{ mb: 2 }}>
+                <Tab label="All" />
+                <Tab label="Metadata" />
+                <Tab label="Content" />
+                <Tab label="Analysis" />
+              </Tabs>
               
-              {/* Tabs for content navigation */}
-              <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-                <Tabs 
-                  value={activeTab} 
-                  onChange={handleTabChange} 
-                  variant="fullWidth"
-                  indicatorColor="primary"
-                  textColor="primary"
-                >
-                  <Tab label="All" />
-                  <Tab label="Metadata" />
-                  <Tab label="Content" />
-                  <Tab label="Analysis" />
-                </Tabs>
-              </Box>
+              {/* Note Content */}
+              {(viewMode === "all" || viewMode === "content") && (
+                <Paper elevation={1} sx={{ p: 2, mb: 3 }}>
+                  <Box sx={{ 
+                    whiteSpace: 'pre-wrap', 
+                    fontFamily: 'monospace',
+                    maxHeight: '300px',
+                    overflow: 'auto'
+                  }}>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      rehypePlugins={[rehypeHighlight]}
+                    >
+                      {selectedNote.content || "*No content available*"}
+                    </ReactMarkdown>
+                  </Box>
+                </Paper>
+              )}
               
-              {/* Content sections based on active tab */}
-              <Box sx={{ p: 3 }}>
-                {/* Metadata Section */}
-                {(viewMode === 'all' || viewMode === 'metadata') && (
-                  <Box sx={{ mb: viewMode === 'all' ? 3 : 0 }}>
-                    {viewMode === 'all' && <Typography variant="h6" gutterBottom>Metadata</Typography>}
-                    <Card variant="outlined" sx={{ mb: 2 }}>
-                      <CardContent>
-                        <Typography variant="body2" component="div">
-                          <Box component="span" sx={{ fontWeight: 'bold', color: 'text.secondary', display: 'inline-block', width: 120 }}>
-                            ID:
-                          </Box>
-                          {selectedNote.id}
-                        </Typography>
-                        <Typography variant="body2" component="div">
-                          <Box component="span" sx={{ fontWeight: 'bold', color: 'text.secondary', display: 'inline-block', width: 120 }}>
-                            Created:
-                          </Box>
-                          {formatDate(selectedNote.created_time)}
-                        </Typography>
-                        <Typography variant="body2" component="div">
-                          <Box component="span" sx={{ fontWeight: 'bold', color: 'text.secondary', display: 'inline-block', width: 120 }}>
-                            Last Edited:
-                          </Box>
-                          {formatDate(selectedNote.last_edited_time)}
-                        </Typography>
-                        {selectedNote.parent_id && (
-                          <Typography variant="body2" component="div">
-                            <Box component="span" sx={{ fontWeight: 'bold', color: 'text.secondary', display: 'inline-block', width: 120 }}>
-                              Parent ID:
-                            </Box>
-                            {selectedNote.parent_id}
-                          </Typography>
-                        )}
-                      </CardContent>
-                    </Card>
+              {/* Gemini Analysis */}
+              {(viewMode === "all" || viewMode === "analysis") && (
+                <Box>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                    <Typography variant="h6">
+                      Gemini Analysis
+                    </Typography>
+                    <Chip label={`${answers.length} Results`} color="primary" />
                   </Box>
-                )}
-
-                {/* Content Section - Markdown Rendering */}
-                {(viewMode === 'all' || viewMode === 'content') && selectedNote.content && (
-                  <Box sx={{ mb: viewMode === 'all' ? 3 : 0 }}>
-                    {viewMode === 'all' && (
-                      <Typography variant="h6" gutterBottom>Content</Typography>
-                    )}
-                    <Card variant="outlined" sx={{ mb: 2 }}>
-                      <CardContent sx={{ 
-                        '& code': { 
-                          backgroundColor: '#f5f5f5', 
-                          padding: '2px 4px', 
-                          borderRadius: 1,
-                          fontFamily: 'monospace' 
-                        },
-                        '& pre': {
-                          backgroundColor: '#f5f5f5',
-                          padding: 2,
-                          borderRadius: 1,
-                          overflow: 'auto'
-                        },
-                        '& h1, & h2, & h3, & h4, & h5, & h6': {
-                          marginTop: 2,
-                          marginBottom: 1,
-                          fontWeight: 'bold'
-                        },
-                        '& p': {
-                          marginBottom: 1.5
-                        }
-                      }}>
-                        <ReactMarkdown 
-                          remarkPlugins={[remarkGfm]} 
-                          rehypePlugins={[rehypeHighlight]}
-                        >
-                          {selectedNote.content}
-                        </ReactMarkdown>
-                      </CardContent>
-                    </Card>
-                  </Box>
-                )}
-
-                {/* Analysis Section */}
-                {(viewMode === 'all' || viewMode === 'analysis') && (
-                  <Box>
-                    {viewMode === 'all' && (
-                      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-                        <Typography variant="h6">Gemini Analysis</Typography>
-                        {answers.length > 0 && (
-                          <Chip 
-                            size="small" 
-                            label={`${answers.length} ${answers.length === 1 ? 'Result' : 'Results'}`} 
-                            color="primary" 
-                          />
-                        )}
-                      </Box>
-                    )}
-                    
-                    {isLoadingQuestions ? (
-                      <Box sx={{ display: 'flex', justifyContent: 'center', p: 3 }}>
-                        <CircularProgress size={24} />
-                        <Typography variant="body2" sx={{ ml: 2 }}>Loading questions...</Typography>
-                      </Box>
-                    ) : answers.length === 0 ? (
-                      <Typography>No analysis found for this note.</Typography>
-                    ) : (
-                      answers.map((ans, idx) => (
-                        <Card key={idx} variant="outlined" sx={{ mb: 3, backgroundColor: '#fafafa' }}>
-                          <CardContent>
-                            {/* Analysis header with metadata */}
-                            <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
-                              <Stack direction="row" spacing={1} flexWrap="wrap">
-                                <Chip 
-                                  size="small" 
-                                  label={`Version ${ans.questions_version}`} 
-                                  color="primary"
-                                  variant="outlined"
-                                />
-                                <Chip 
-                                  size="small" 
-                                  label={ans.model} 
-                                  color="secondary"
-                                  variant="outlined"
-                                />
-                              </Stack>
-                              {ans.date_executed && (
-                                <Typography variant="caption" color="text.secondary">
-                                  {formatDate(ans.date_executed)}
-                                </Typography>
-                              )}
-                            </Box>
-                            
-                            {/* Answers display */}
-                            <Box sx={{ 
-                              backgroundColor: '#f5f5f5',
-                              borderRadius: 1,
-                              overflow: 'hidden'
-                            }}>
-                              {ans.answers_json && Object.entries(ans.answers_json).map(([key, value], i) => {
-                                const question = getQuestionForKey(key, ans.questions_version);
-                                return (
-                                  <Box 
-                                    key={key}
-                                    sx={{ 
-                                      p: 2, 
-                                      borderBottom: i < Object.keys(ans.answers_json).length - 1 ? '1px solid #e0e0e0' : 'none',
-                                      '&:hover': {
-                                        backgroundColor: '#eef5fd'
-                                      }
-                                    }}
-                                  >
-                                    <Box sx={{ display: 'flex', alignItems: 'flex-start', mb: 1 }}>
-                                      <Tooltip title={question} placement="top-start">
-                                        <Box sx={{ 
-                                          display: 'flex', 
-                                          alignItems: 'center', 
-                                          cursor: 'help',
-                                          color: 'primary.main',
-                                          fontWeight: 'medium',
-                                          mr: 1,
-                                          '&:hover': { textDecoration: 'underline' }
-                                        }}>
-                                          <Typography variant="subtitle2" component="span">
-                                            {key.toUpperCase()}
-                                          </Typography>
-                                          <InfoIcon fontSize="small" sx={{ ml: 0.5, fontSize: '1rem' }} />
-                                        </Box>
-                                      </Tooltip>
-                                      <Typography 
-                                        variant="body2" 
-                                        sx={{ 
-                                          flex: 1,
-                                          fontStyle: value === "Not mentioned." ? 'italic' : 'normal',
-                                          color: value === "Not mentioned." ? 'text.secondary' : 'text.primary'
-                                        }}
-                                      >
-                                        {value}
+                  
+                  {isLoadingQuestions ? (
+                    <CircularProgress />
+                  ) : versionsToDisplay.length === 0 ? (
+                    <Typography color="text.secondary">No analysis available for this note.</Typography>
+                  ) : (
+                    // Map through versions to display
+                    versionsToDisplay.map((version) => {
+                      const answer = answers.find(a => a.questions_version === version);
+                      if (!answer) return null;
+                      
+                      return (
+                        <Box key={version} sx={{ mb: 4 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                            <Chip 
+                              label={`Version ${version}`} 
+                              size="small" 
+                              sx={{ mr: 1 }} 
+                            />
+                            <Chip 
+                              label={answer.model} 
+                              size="small" 
+                              variant="outlined"
+                            />
+                            {version === latestVersion && (
+                              <Chip size="small" color="primary" label="Latest" sx={{ ml: 1 }} />
+                            )}
+                            <Typography variant="caption" sx={{ ml: 'auto' }}>
+                              {getFormattedDate(answer.date_executed)}
+                            </Typography>
+                          </Box>
+                          
+                          {/* Questions and Answers */}
+                          <List sx={{ mt: 1 }}>
+                            {Object.entries(answer.answers_json).map(([qNum, answerText]) => (
+                              <Card key={`${version}-${qNum}`} variant="outlined" sx={{ mb: 2 }}>
+                                <CardContent>
+                                  <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                                    <Tooltip title={getQuestionText(version, qNum)}>
+                                      <Typography variant="subtitle1" color="text.secondary" sx={{ display: 'flex', alignItems: 'center' }}>
+                                        {qNum.toUpperCase()} <InfoIcon fontSize="small" sx={{ ml: 0.5 }} />
                                       </Typography>
-                                    </Box>
+                                    </Tooltip>
                                   </Box>
-                                );
-                              })}
-                            </Box>
-                          </CardContent>
-                        </Card>
-                      ))
+                                  <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap' }}>
+                                    <ReactMarkdown
+                                      remarkPlugins={[remarkGfm]}
+                                      rehypePlugins={[rehypeHighlight]}
+                                    >
+                                      {answerText}
+                                    </ReactMarkdown>
+                                  </Typography>
+                                </CardContent>
+                              </Card>
+                            ))}
+                          </List>
+                        </Box>
+                      );
+                    })
+                  )}
+                </Box>
+              )}
+              
+              {/* Metadata Section */}
+              {(viewMode === "all" || viewMode === "metadata") && (
+                <Paper elevation={1} sx={{ mt: 3, p: 2 }}>
+                  <Typography variant="h6" gutterBottom>
+                    Metadata
+                  </Typography>
+                  <Stack spacing={1}>
+                    <Box>
+                      <Typography variant="caption" color="text.secondary">ID</Typography>
+                      <Typography variant="body2">{selectedNote.id}</Typography>
+                    </Box>
+                    {selectedNote.parent_id && (
+                      <Box>
+                        <Typography variant="caption" color="text.secondary">Parent ID</Typography>
+                        <Typography variant="body2">{selectedNote.parent_id}</Typography>
+                      </Box>
                     )}
-                  </Box>
-                )}
-              </Box>
+                    {selectedNote.created_time && (
+                      <Box>
+                        <Typography variant="caption" color="text.secondary">Created</Typography>
+                        <Typography variant="body2">{getFormattedDate(selectedNote.created_time)}</Typography>
+                      </Box>
+                    )}
+                    {selectedNote.last_edited_time && (
+                      <Box>
+                        <Typography variant="caption" color="text.secondary">Last Edited</Typography>
+                        <Typography variant="body2">{getFormattedDate(selectedNote.last_edited_time)}</Typography>
+                      </Box>
+                    )}
+                  </Stack>
+                </Paper>
+              )}
             </>
           ) : (
-            <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', p: 4 }}>
-              <Typography sx={{ color: 'text.secondary' }}>Select a note to view details.</Typography>
-            </Box>
+            <Paper 
+              elevation={1} 
+              sx={{ 
+                p: 4, 
+                height: '300px', 
+                display: 'flex', 
+                alignItems: 'center', 
+                justifyContent: 'center',
+                flexDirection: 'column',
+                gap: 2
+              }}
+            >
+              <Typography variant="h6" color="text.secondary">
+                Select a note to view details
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                {processedNotes.length === 0 ? (
+                  "No notes found. Try changing your filters."
+                ) : (
+                  `${processedNotes.length} notes available`
+                )}
+              </Typography>
+            </Paper>
           )}
-        </Paper>
+        </Box>
       </Box>
     </Container>
   );

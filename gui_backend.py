@@ -1,9 +1,10 @@
 import os
 import sqlite3
+import json
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 DB_PATH = "notion_pages.db"
 
@@ -29,6 +30,16 @@ class GeminiAnswer(BaseModel):
     model: str
     date_executed: Optional[str]
     answers_json: dict
+
+class QuestionVersion(BaseModel):
+    version: str
+    date_updated: str
+    
+class QuestionData(BaseModel):
+    version: str
+    instructions: str
+    questions: List[str]
+    date_updated: str
 
 @app.get("/notes", response_model=List[Note])
 def get_notes():
@@ -68,6 +79,26 @@ def get_answers_index():
     conn.close()
     return ids
 
+@app.get("/note_versions_index")
+def get_note_versions_index():
+    """
+    Returns a mapping of note_id -> list of available question versions
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT note_id, questions_version FROM gemini_analysis")
+    
+    # Build a mapping of note_id -> list of versions
+    version_map = {}
+    for row in c.fetchall():
+        note_id, version = row
+        if note_id not in version_map:
+            version_map[note_id] = []
+        version_map[note_id].append(version)
+    
+    conn.close()
+    return version_map
+
 @app.get("/hierarchy")
 def get_hierarchy():
     conn = sqlite3.connect(DB_PATH)
@@ -81,3 +112,60 @@ def get_hierarchy():
     for id, parent_id in rows:
         tree[parent_id].append(id)
     return tree
+
+# New endpoints for questions data
+
+@app.get("/question_versions", response_model=List[QuestionVersion])
+def get_question_versions():
+    """
+    Get all available question versions from the database
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT version, date_updated FROM questions ORDER BY version DESC")
+    versions = [QuestionVersion(version=row[0], date_updated=row[1]) for row in c.fetchall()]
+    conn.close()
+    return versions
+
+@app.get("/questions/{version}", response_model=QuestionData)
+def get_questions_by_version(version: str):
+    """
+    Get questions for a specific version
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT version, date_updated, questions_json FROM questions WHERE version=?", (version,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Question version {version} not found")
+    
+    version_str, date_updated, questions_json = row
+    
+    # Parse the JSON string
+    try:
+        data = json.loads(questions_json)
+        return QuestionData(
+            version=version_str,
+            date_updated=date_updated,
+            instructions=data.get("instructions", ""),
+            questions=data.get("questions", [])
+        )
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail=f"Invalid JSON data for question version {version}")
+
+@app.get("/latest_question_version")
+def get_latest_question_version():
+    """
+    Get the latest question version
+    """
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT version FROM questions ORDER BY version DESC LIMIT 1")
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        return {"version": None}
+    return {"version": row[0]}

@@ -63,8 +63,26 @@ def init_db():
         parent_id TEXT,
         created_time TEXT,
         last_edited_time TEXT,
-        content TEXT
+        content TEXT,
+        content_length INTEGER
     )''')
+    
+    # Check if content_length column exists, add it if not
+    c.execute("PRAGMA table_info(pages)")
+    columns = [col[1] for col in c.fetchall()]
+    if "content_length" not in columns:
+        print("Adding content_length column to pages table...")
+        c.execute("ALTER TABLE pages ADD COLUMN content_length INTEGER")
+        
+        # Update existing records with content_length
+        c.execute("SELECT id, content FROM pages WHERE content IS NOT NULL")
+        for row in c.fetchall():
+            page_id, content = row
+            if content:
+                c.execute("UPDATE pages SET content_length = ? WHERE id = ?", 
+                         (len(content), page_id))
+        conn.commit()
+        print("Updated content_length for existing records")
     # If upgrading from an older DB, add content column if missing
     c.execute("PRAGMA table_info(pages)")
     columns = [row[1] for row in c.fetchall()]
@@ -86,19 +104,49 @@ def init_db():
         head_title TEXT,
         head_content TEXT
     )''')
+    
+    # Add questions table for storing UI questions
+    c.execute('''CREATE TABLE IF NOT EXISTS questions (
+        version TEXT PRIMARY KEY,
+        date_updated TEXT,
+        questions_json TEXT
+    )''')
+    
     conn.commit()
     return conn
 
 def save_page_to_db(conn, page_id, parent_id, created_time, last_edited_time, content=None):
     c = conn.cursor()
-    # Fetch existing content if present
-    c.execute('SELECT content FROM pages WHERE id=?', (page_id,))
-    row = c.fetchone()
-    if content is None and row is not None:
-        # Preserve existing content if new content is None
-        content = row[0]
-    c.execute('''INSERT OR REPLACE INTO pages (id, parent_id, created_time, last_edited_time, content)
-                 VALUES (?, ?, ?, ?, ?)''', (page_id, parent_id, created_time, last_edited_time, content))
+    # Check if page already exists
+    c.execute('SELECT * FROM pages WHERE id = ?', (page_id,))
+    existing = c.fetchone()
+    
+    # Calculate content length if content is provided
+    content_length = len(content) if content else None
+    
+    if existing:
+        # Update existing page
+        if content is not None:
+            c.execute('''UPDATE pages SET
+                        parent_id = ?,
+                        created_time = ?,
+                        last_edited_time = ?,
+                        content = ?,
+                        content_length = ?
+                     WHERE id = ?''',
+                     (parent_id, created_time, last_edited_time, content, content_length, page_id))
+        else:
+            c.execute('''UPDATE pages SET
+                        parent_id = ?,
+                        created_time = ?,
+                        last_edited_time = ?
+                     WHERE id = ?''',
+                     (parent_id, created_time, last_edited_time, page_id))
+    else:
+        # Insert new page
+        c.execute('''INSERT INTO pages (id, parent_id, created_time, last_edited_time, content, content_length)
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                  (page_id, parent_id, created_time, last_edited_time, content, content_length))
     conn.commit()
 
 def get_page_from_db(conn, page_id):
@@ -422,8 +470,9 @@ def reset_db():
     print("DB reset and metadata fetched.")
 
 # --- 2. ANALYZE_NOTES ---
-def analyze_notes(questions_version=None):
+def analyze_notes(questions_version=None, from_date=None):
     from cli.gemini_utils import load_questions
+    import datetime
     if questions_version is None:
         # Use latest version by inspecting questions directory
         files = os.listdir(os.path.join(os.path.dirname(__file__), '../questions'))
@@ -439,9 +488,67 @@ def analyze_notes(questions_version=None):
     conn = init_db()
     os.makedirs(OUTPUTS_DIR, exist_ok=True)
     c = conn.cursor()
-    c.execute('SELECT id, content FROM pages WHERE content IS NOT NULL AND TRIM(content) != ""')
+
+    # Parse from_date if provided
+    date_filter = None
+    if from_date:
+        try:
+            # Create a naive datetime from the input string
+            naive_date = datetime.datetime.strptime(from_date, "%d/%m/%Y")
+            # Make it aware with UTC timezone
+            date_filter = naive_date.replace(tzinfo=datetime.timezone.utc)
+        except Exception as e:
+            print(f"Invalid from_date format (expected DD/MM/YYYY): {from_date}")
+            return
+
+    # Fetch note metadata for filtering and sorting
+    # Include content_length in our query for efficient sorting
+    c.execute('''SELECT id, content, content_length, created_time, last_edited_time 
+                FROM pages 
+                WHERE content IS NOT NULL AND TRIM(content) != ""''')
     notes = c.fetchall()
-    for note_id, content in notes:
+    
+    # Filter by date if needed
+    filtered_notes = []
+    for row in notes:
+        note_id, content, content_length, created_time, last_edited_time = row
+        if date_filter:
+            # Parse times from database (ISO format)
+            ct = None
+            lt = None
+            try:
+                if created_time:
+                    # Parse with timezone info (already aware)
+                    ct = datetime.datetime.fromisoformat(created_time.replace("Z", "+00:00"))
+                if last_edited_time:
+                    # Parse with timezone info (already aware)
+                    lt = datetime.datetime.fromisoformat(last_edited_time.replace("Z", "+00:00"))
+            except Exception as e:
+                print(f"Warning: Could not parse date for note {note_id}: {e}")
+                pass
+            # Only keep if either date is on/after filter
+            if (ct and ct >= date_filter) or (lt and lt >= date_filter):
+                filtered_notes.append((note_id, content))
+        else:
+            filtered_notes.append((note_id, content))
+
+    # Sort by content length (longest first) using the stored value
+    if filtered_notes:
+        # Get the content lengths for the filtered notes
+        content_length_dict = {}
+        for note_id, content in filtered_notes:
+            c.execute('SELECT content_length FROM pages WHERE id = ?', (note_id,))
+            result = c.fetchone()
+            if result and result[0]:
+                content_length_dict[note_id] = result[0]
+            else:
+                # Fallback to calculating length if not in DB
+                content_length_dict[note_id] = len(content)
+        
+        # Sort using the content_length dictionary
+        filtered_notes.sort(key=lambda x: content_length_dict.get(x[0], 0), reverse=True)
+
+    for note_id, content in filtered_notes:
         output_path = os.path.join(OUTPUTS_DIR, f"gemini_{note_id}_v{questions_version}_{MODEL_NAME}.json")
         if os.path.exists(output_path):
             try:
@@ -453,6 +560,16 @@ def analyze_notes(questions_version=None):
             except Exception as e:
                 continue
         result = call_gemini_api(content, questions_version)
+        # Only save result if it's a successful analysis (no error key)
+        if "error" in result:
+            # If this is a quota/resource exhausted error, stop all processing immediately
+            if result.get("status_code") == 429 and "quota" in result.get("error", "").lower():
+                print("Gemini API quota exhausted. Halting further analysis.")
+                import sys
+                sys.exit(1)
+            else:
+                print(f"Skipping note {note_id} due to API error: {result.get('error')}")
+                continue
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
     print("Gemini analysis complete.")
@@ -488,7 +605,135 @@ def load_gemini_outputs():
 
 # --- 4. LAUNCH_GUI ---
 def launch_gui():
-    print("Launching GUI (to be implemented)...")
+    from gui.app import run_app
+    run_app()
 
-# --- Move legacy CLI logic to cli/legacy/ ---
-# (Remove the main() CLI entrypoint and argument parsing from this file)
+# --- 5. UPDATE_QUESTIONS ---
+def update_questions(version=None, force_update=False):
+    """
+    Update or insert questions in the database.
+    
+    Args:
+        version (str, optional): The specific version of questions to update.
+                               If None, updates all versions found in the questions directory.
+        force_update (bool): If True, updates even if the version already exists in the database.
+    
+    Returns:
+        tuple: (success, message) indicating success/failure and a descriptive message
+    """
+    from cli.gemini_utils import QUESTIONS_DIR
+    import os
+    import glob
+    from datetime import datetime
+    
+    # Initialize the database if it doesn't exist
+    conn = init_db()
+    cursor = conn.cursor()
+    
+    try:
+        updated_versions = []
+        skipped_versions = []
+        
+        # Get existing versions in the database
+        cursor.execute("SELECT version FROM questions")
+        existing_versions = set(row[0] for row in cursor.fetchall())
+        
+        # If a specific version is requested
+        if version is not None:
+            version_files = [os.path.join(QUESTIONS_DIR, f"questions_v{version}.json")]
+        else:
+            # Get all question files from the questions directory
+            version_files = glob.glob(os.path.join(QUESTIONS_DIR, "questions_v*.json"))
+        
+        for question_file in version_files:
+            # Extract version from filename
+            file_version = os.path.basename(question_file).replace("questions_v", "").replace(".json", "")
+            
+            # Skip if version already exists and force_update is False
+            if file_version in existing_versions and not force_update:
+                skipped_versions.append(f"v{file_version}")
+                continue
+                
+            # Load questions from file
+            with open(question_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                
+            instructions = data.get("instructions", "")
+            questions = data.get("questions", [])
+            version_str = data.get("version", f"v{file_version}")
+            
+            # Prepare the data to insert
+            questions_data = {
+                "instructions": instructions,
+                "questions": questions,
+                "version": version_str
+            }
+            questions_json = json.dumps(questions_data, ensure_ascii=False)
+            date_updated = datetime.now().isoformat()
+            
+            # Insert or replace the questions in the database
+            cursor.execute(
+                "INSERT OR REPLACE INTO questions (version, date_updated, questions_json) VALUES (?, ?, ?)",
+                (version_str, date_updated, questions_json)
+            )
+            updated_versions.append(version_str)
+        
+        conn.commit()
+        
+        # Prepare result message
+        message = ""
+        if updated_versions:
+            message += f"Successfully updated questions versions: {', '.join(updated_versions)}"
+        if skipped_versions:
+            if message:
+                message += "\n"
+            message += f"Skipped existing versions: {', '.join(skipped_versions)}"
+        if not updated_versions and not skipped_versions:
+            message = "No question files found to update."
+        
+        return True, message
+    
+    except Exception as e:
+        conn.rollback()
+        error_message = f"Failed to update questions: {str(e)}"
+        print(error_message)
+        return False, error_message
+    
+    finally:
+        conn.close()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Notion Notes CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # reset_db command
+    subparsers.add_parser("reset_db", help="Integrate Notion notes, update DB and fetch metadata")
+
+    # analyze_notes command
+    analyze_parser = subparsers.add_parser("analyze_notes", help="Analyze notes with Gemini AI")
+    analyze_parser.add_argument("--questions_version", type=str, default=None, help="Which questions version to use (default: latest)")
+    analyze_parser.add_argument("--from_date", type=str, default=None, help="Only analyze notes created/edited on or after this date (format: DD/MM/YYYY)")
+
+    # load_outputs command
+    subparsers.add_parser("load_outputs", help="Load Gemini outputs into the DB")
+
+    # launch_gui command
+    subparsers.add_parser("launch_gui", help="Start the web GUI server")
+
+    # update_questions command
+    subparsers.add_parser("update_questions", help="Update questions in the database")
+
+    args = parser.parse_args()
+
+    if args.command == "reset_db":
+        reset_db()
+    elif args.command == "analyze_notes":
+        analyze_notes(questions_version=args.questions_version, from_date=args.from_date)
+    elif args.command == "load_outputs":
+        load_gemini_outputs()
+    elif args.command == "launch_gui":
+        launch_gui()
+    elif args.command == "update_questions":
+        update_questions()
+    else:
+        parser.print_help()
