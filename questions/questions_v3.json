@@ -1,0 +1,22 @@
+{
+  "version": "v3",
+  "instructions": "You are an expert analyst tasked with extracting insights from a personal note written by an individual. The note reflects the author's thoughts, experiences, and reflections, and the pronoun 'I' refers to the note’s author, not you. Your goal is to analyze the note and answer the following questions about the author’s perspective, providing a structured JSON response. If the note does not contain relevant information for a question, return 'Not mentioned.' for that answer. Keep answers concise, accurate, and based solely on the note’s content without speculation. Format the response as a JSON object with the question numbers as keys (q1 to qX) and the answers as values.",
+  "questions": [
+    "What experiences triggered positive emotional responses?",
+    "What situations caused me to feel aligned with my actions?",
+    "What situations caused me to feel misaligned with my actions?",
+    "What behaviours or qualities do I admire in others?",
+    "What behaviours or qualities do I criticise in others?",
+    "What topics and activities am I interested in?",
+    "Where do I invest my energy when nobody is directing me?",
+    "What problems am I trying to solve?",
+    "What criteria did I use to make choices?",
+    "Was I satisfied with any decisions?",
+    "Was I regretting any decisions?",
+    "What trade-offs did I consider when making a decision?",
+    "How do I describe myself in contrast to others?",
+    "What aspects of myself do I question or want to change?",
+    "What roles do I adopt?",
+    "What is the main theme or focus of the note?"
+  ]
+}

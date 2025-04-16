@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+.env
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node/JavaScript (for the frontend)
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+.pnp/
+.pnp.js
+coverage/
+.next/
+out/
+.nuxt/
+.cache/
+.parcel-cache/
+
+# Build output
+/gui/build/
+/gui/dist/
+
+# Temporary files
+*.log
+*.tmp
+temp/
+
+# Notion API secrets
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Personal data
+notion_notes/
+answers_to_questions_by_LLM/
+# Optional: Uncomment if you want to ignore certain generated outputs
+# notion_pages.db
+# answers_to_questions_by_LLM/
