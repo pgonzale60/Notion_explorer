@@ -39,38 +39,61 @@ Questions:\n{numbered}\n\nInput note:\n{note_content}\n\nOutput format:\n```json
 
 # Helper to parse retryDelay like '7s' or '2.5s'
 def parse_retry_delay(retry_delay_str):
-    if retry_delay_str.endswith('s'):
-        return float(retry_delay_str[:-1])
-    return 1.0
+    if not retry_delay_str:
+        return 10.0  # Default fallback
+    
+    try:
+        # Handle format like '14s'
+        if isinstance(retry_delay_str, str) and 's' in retry_delay_str:
+            return float(retry_delay_str.replace('s', ''))
+        # Handle numeric values
+        return float(retry_delay_str)
+    except (ValueError, TypeError):
+        return 10.0  # Default fallback
 
 def call_gemini_api(note_content, questions_version="1", max_attempts=10):
     instructions, questions, version_str = load_questions(questions_version)
     prompt = build_prompt(note_content, instructions, questions)
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt,
-            )
-            break  # Success
-        except ClientError as e:
+    
+    try:
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+        )
+    except ClientError as e:
+        error_message = str(e)
+        print(f"Gemini API error: {error_message}")
+        
+        # Check if this is a quota/rate limit error
+        if "429" in error_message and "RESOURCE_EXHAUSTED" in error_message:
+            # Extract the retry delay suggestion if available
+            retry_delay = "unknown"
             if hasattr(e, 'response_json') and e.response_json:
-                err = e.response_json.get('error', {})
-                if err.get('code') == 429:
-                    # Try to get retryDelay from details
-                    retry_delay = 10  # fallback
-                    for detail in err.get('details', []):
-                        if detail.get('@type', '').endswith('RetryInfo'):
-                            retry_delay_str = detail.get('retryDelay', '7s')
-                            retry_delay = parse_retry_delay(retry_delay_str)
-                    print(f"[Gemini] Rate limited (429). Retrying after {retry_delay} seconds (attempt {attempt})...")
-                    time.sleep(retry_delay)
-                    if attempt >= max_attempts:
-                        raise RuntimeError(f"Max retry attempts ({max_attempts}) reached for Gemini API.")
-                    continue
-            raise  # Not a rate limit error, re-raise
+                details = e.response_json.get('error', {}).get('details', [])
+                for detail in details:
+                    if '@type' in detail and 'RetryInfo' in detail['@type']:
+                        retry_delay = detail.get('retryDelay', 'unknown')
+            
+            # Create a structured error response
+            return {
+                "error": "API quota exceeded",
+                "message": f"Gemini API quota exceeded. Suggested retry delay: {retry_delay}",
+                "status_code": 429,
+                "questions_version": version_str,
+                "model": MODEL_NAME,
+                "date_executed": datetime.now().isoformat()
+            }
+        
+        # For other errors, return a structured error response
+        return {
+            "error": "API error",
+            "message": error_message,
+            "questions_version": version_str,
+            "model": MODEL_NAME,
+            "date_executed": datetime.now().isoformat()
+        }
+    
+    # Process successful response
     try:
         text = response.text.strip()
         if text.startswith('```json'):
@@ -80,6 +103,7 @@ def call_gemini_api(note_content, questions_version="1", max_attempts=10):
         result = json.loads(text)
     except Exception as e:
         result = {"error": f"Failed to parse Gemini response: {e}", "raw": response.text}
+    
     # Always include version info, model, and execution date in output
     result["questions_version"] = version_str
     result["model"] = MODEL_NAME
