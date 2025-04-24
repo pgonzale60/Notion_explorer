@@ -13,8 +13,14 @@ import re
 # --- Setup ---
 load_dotenv()
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-if not NOTION_TOKEN:
+# Don't prompt for input in CI/testing environments
+if not NOTION_TOKEN and "CI" not in os.environ and "PYTEST_CURRENT_TEST" not in os.environ:
     NOTION_TOKEN = input("Enter your Notion integration token: ").strip()
+elif not NOTION_TOKEN:
+    # For CI/testing, use a dummy token or log a message
+    NOTION_TOKEN = "test_token_for_ci"
+    print("NOTICE: Using test token for CI/automated testing environment")
+
 NOTION_API_URL = "https://api.notion.com/v1"
 HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
