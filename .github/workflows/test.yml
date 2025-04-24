@@ -36,4 +36,7 @@ jobs:
     
     - name: Run tests
       run: |
-        python -m pytest --junitxml=test-results.xml
+        # Display test directory structure for debugging
+        find tests -type f -name "test_*.py" | sort
+        # Run pytest with explicit path to tests directory
+        python -m pytest tests/ -v --asyncio-mode=strict
