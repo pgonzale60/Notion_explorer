@@ -2,5 +2,6 @@ notion-client>=2.2.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 google-genai
-uvicorn
-fastapi
+fastapi>=0.95.0
+uvicorn>=0.22.0
+fastapi-utils>=0.2.1
