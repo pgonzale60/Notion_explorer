@@ -36,7 +36,4 @@ jobs:
     
     - name: Run tests
       run: |
-        # Display test directory structure for debugging
-        find tests -type f -name "test_*.py" | sort
-        # Run pytest with explicit path to tests directory
-        python -m pytest tests/ -v --asyncio-mode=strict
+        python -m pytest --asyncio-mode=strict
