@@ -420,7 +420,7 @@ def batch_gemini(questions_version="1"):
                     existing.get("model") == MODEL_NAME):
                     print(f"Skipping {note_id}: already processed with questions_v{questions_version}, model={MODEL_NAME}.")
                     continue
-            except Exception:
+            except Exception as e:
                 print(f"Warning: Could not verify version/model for {output_path}, skipping overwrite.")
                 continue
         print(f"Processing note {note_id}...")
@@ -533,7 +533,8 @@ def analyze_notes(questions_version=None, from_date=None):
                 print(f"Warning: Could not parse date for note {note_id}: {e}")
                 pass
             # Only keep if either date is on/after filter
-            if (ct and ct >= date_filter) or (lt and lt >= date_filter):
+            if ((ct and date_filter <= ct <= datetime.datetime.now(datetime.timezone.utc)) or
+                (lt and date_filter <= lt <= datetime.datetime.now(datetime.timezone.utc))):
                 filtered_notes.append((note_id, content))
         else:
             filtered_notes.append((note_id, content))
@@ -560,11 +561,14 @@ def analyze_notes(questions_version=None, from_date=None):
             try:
                 with open(output_path, "r", encoding="utf-8") as f:
                     existing = json.load(f)
+                print(f"existing.questions_version={existing.get('questions_version')}, expected_version=v{questions_version}")
+                print(f"existing.model={existing.get('model')}, expected_model={MODEL_NAME}")
                 if (str(existing.get("questions_version")) == f"v{questions_version}" and
                     existing.get("model") == MODEL_NAME):
                     continue
             except Exception as e:
                 continue
+        print(f"Processing note {note_id}...")
         result = call_gemini_api(content, questions_version)
         # Only save result if it's a successful analysis (no error key)
         if "error" in result:
@@ -708,6 +712,227 @@ def update_questions(version=None, force_update=False):
     finally:
         conn.close()
 
+# --- 6. GET_NOTES_IN_TIMEFRAME ---
+def get_notes_in_timeframe(start_date, end_date=None, output_format="json"):
+    """
+    Get all notes created or last updated within a specific time frame and output them
+    as a single JSON file for analysis with Gemini.
+    
+    Args:
+        start_date (str): Start date in DD/MM/YYYY format
+        end_date (str, optional): End date in DD/MM/YYYY format. If None, includes notes until present.
+        output_format (str): Output format ("json" for Gemini analysis)
+    
+    Returns:
+        str: Path to the output file containing the notes
+    """
+    import datetime
+    
+    # Parse dates
+    try:
+        # Create datetime objects from the input strings
+        start_datetime = datetime.datetime.strptime(start_date, "%d/%m/%Y")
+        # Make it aware with UTC timezone
+        start_datetime = start_datetime.replace(tzinfo=datetime.timezone.utc)
+        
+        if end_date:
+            end_datetime = datetime.datetime.strptime(end_date, "%d/%m/%Y")
+            # Make it aware with UTC timezone and set to end of day
+            end_datetime = end_datetime.replace(
+                hour=23, minute=59, second=59, 
+                tzinfo=datetime.timezone.utc
+            )
+        else:
+            # If no end date, use current time
+            end_datetime = datetime.datetime.now(datetime.timezone.utc)
+    except Exception as e:
+        print(f"Invalid date format (expected DD/MM/YYYY): {e}")
+        return None
+    
+    # Initialize database
+    conn = init_db()
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
+    c = conn.cursor()
+    
+    # Fetch notes within the time range
+    c.execute('''SELECT id, content, created_time, last_edited_time 
+                FROM pages 
+                WHERE content IS NOT NULL AND TRIM(content) != ""''')
+    all_notes = c.fetchall()
+    
+    # Filter by date range
+    filtered_notes = []
+    for row in all_notes:
+        note_id, content, created_time, last_edited_time = row
+        
+        # Parse times from database (ISO format)
+        ct = None
+        lt = None
+        try:
+            if created_time:
+                # Parse with timezone info
+                ct = datetime.datetime.fromisoformat(created_time.replace("Z", "+00:00"))
+            if last_edited_time:
+                # Parse with timezone info
+                lt = datetime.datetime.fromisoformat(last_edited_time.replace("Z", "+00:00"))
+        except Exception as e:
+            print(f"Warning: Could not parse date for note {note_id}: {e}")
+            continue
+            
+        # Keep note if it was created or edited within the time range
+        if ((ct and start_datetime <= ct <= end_datetime) or
+            (lt and start_datetime <= lt <= end_datetime)):
+            filtered_notes.append({
+                "id": note_id,
+                "content": content,
+                "created_time": created_time,
+                "last_edited_time": last_edited_time
+            })
+    
+    # Return if no notes found
+    if not filtered_notes:
+        print(f"No notes found within the specified time range.")
+        return None
+    
+    # Sort notes by created_time (oldest to newest)
+    filtered_notes.sort(key=lambda x: (
+        datetime.datetime.fromisoformat(x['created_time'].replace("Z", "+00:00")) 
+        if x.get('created_time') else datetime.datetime.max
+    ))
+    
+    # Create output JSON with all notes
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = os.path.join(OUTPUTS_DIR, f"bulk_notes_{timestamp}.json")
+    
+    # Format the output based on the requested format
+    if output_format == "json":
+        # Build a JSON object with combined notes for Gemini analysis
+        output_data = {
+            "notes": filtered_notes,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "date_range": {
+                "start": start_datetime.isoformat(),
+                "end": end_datetime.isoformat()
+            },
+            "total_notes": len(filtered_notes)
+        }
+        
+        # Write to file
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(output_data, f, ensure_ascii=False, indent=2)
+    
+    print(f"Extracted {len(filtered_notes)} notes within the time frame.")
+    print(f"Output saved to {output_file}")
+    
+    return output_file
+
+def analyze_bulk_notes(notes_file, questions_version=None):
+    """
+    Analyze a bulk JSON file of notes with Gemini.
+    
+    Args:
+        notes_file (str): Path to the JSON file containing notes
+        questions_version (str, optional): Question version to use
+    
+    Returns:
+        str: Path to the output file with analysis results
+    """
+    from cli.gemini_utils import call_gemini_api, MODEL_NAME
+    from datetime import datetime
+    import html
+    
+    # Get the appropriate questions version
+    if questions_version is None:
+        # Use latest version by inspecting questions directory
+        files = os.listdir(os.path.join(os.path.dirname(__file__), '../questions'))
+        versions = []
+        for fname in files:
+            m = re.match(r'questions_v(\d+)\.json', fname)
+            if m:
+                versions.append(int(m.group(1)))
+        if versions:
+            questions_version = str(max(versions))
+        else:
+            questions_version = "1"
+    
+    # Load notes from file
+    try:
+        with open(notes_file, "r", encoding="utf-8") as f:
+            notes_data = json.load(f)
+    except Exception as e:
+        print(f"Error reading notes file: {e}")
+        return None
+    
+    # Create mapping of short IDs to original note IDs and build combined content
+    id_map = {}
+    combined_notes = ""
+    for i, note in enumerate(notes_data.get("notes", [])):
+        # Use a short ID to reduce token usage
+        short_id = f"N{i+1}"
+        id_map[short_id] = note['id']
+        # Clean and escape the content
+        clean_content = note["content"]
+        # Replace any problematic characters or sequences
+        clean_content = clean_content.replace("\\", "\\\\")  # Escape backslashes
+        clean_content = clean_content.replace('"', '\\"')    # Escape double quotes
+        clean_content = clean_content.replace('\n', ' ')     # Replace newlines with spaces
+        
+        # Add note metadata and content to the combined text
+        note_created = note.get("created_time", "Unknown date")
+        if note_created and note_created != "Unknown date":
+            try:
+                # Format created time for better readability
+                dt = datetime.fromisoformat(note_created.replace("Z", "+00:00"))
+                formatted_date = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                formatted_date = note_created
+        else:
+            formatted_date = "Unknown date"
+            
+        combined_notes += f"\n\n--- NOTE {short_id} (CREATED: {formatted_date}) ---\n\n"
+        combined_notes += clean_content
+    
+    # Check word count limit
+    word_count = len(combined_notes.split())
+    if word_count > 80000:
+        print(f"Combined notes exceed 80000 words ({word_count}); skipping Gemini API call.")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = os.path.join(OUTPUTS_DIR, f"gemini_bulk_analysis_{timestamp}_{MODEL_NAME}.json")
+        result = {"error": f"Combined notes exceed 80000 words ({word_count}); no request sent"}
+        result["source_file"] = notes_file
+        result["notes_count"] = notes_data.get("total_notes", 0)
+        result["date_range"] = notes_data.get("date_range", {})
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        print(f"Skipped Gemini call. Results saved to: {output_path}")
+        return output_path
+    
+    # Call Gemini API with the combined notes
+    print(f"Analyzing {notes_data.get('total_notes', 0)} notes with Gemini...")
+    result = call_gemini_api(combined_notes, questions_version)
+    
+    # Convert short IDs back to original IDs in sources
+    for key, val in result.items():
+        if key.startswith("q") and isinstance(val, list):
+            for ans in val:
+                if "sources" in ans:
+                    ans["sources"] = [id_map.get(s, s) for s in ans["sources"]]
+    
+    # Save analysis result
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join(OUTPUTS_DIR, f"gemini_bulk_analysis_{timestamp}_{MODEL_NAME}.json")
+    
+    # Add metadata to the result
+    result["source_file"] = notes_file
+    result["notes_count"] = notes_data.get("total_notes", 0)
+    result["date_range"] = notes_data.get("date_range", {})
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    
+    print(f"Bulk analysis complete. Results saved to: {output_path}")
+    return output_path
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Notion Notes CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -729,6 +954,17 @@ if __name__ == "__main__":
     # update_questions command
     subparsers.add_parser("update_questions", help="Update questions in the database")
 
+    # get_notes_in_timeframe command
+    timeframe_parser = subparsers.add_parser("get_notes_in_timeframe", help="Get notes within a specific time frame")
+    timeframe_parser.add_argument("--start_date", type=str, required=True, help="Start date in DD/MM/YYYY format")
+    timeframe_parser.add_argument("--end_date", type=str, default=None, help="End date in DD/MM/YYYY format (default: present)")
+    timeframe_parser.add_argument("--output_format", type=str, default="json", help="Output format (default: json)")
+
+    # analyze_bulk_notes command
+    bulk_notes_parser = subparsers.add_parser("analyze_bulk_notes", help="Analyze a bulk JSON file of notes with Gemini")
+    bulk_notes_parser.add_argument("--notes_file", type=str, required=True, help="Path to the JSON file containing notes")
+    bulk_notes_parser.add_argument("--questions_version", type=str, default=None, help="Question version to use (default: latest)")
+
     args = parser.parse_args()
 
     if args.command == "reset_db":
@@ -741,5 +977,9 @@ if __name__ == "__main__":
         launch_gui()
     elif args.command == "update_questions":
         update_questions()
+    elif args.command == "get_notes_in_timeframe":
+        get_notes_in_timeframe(args.start_date, args.end_date, args.output_format)
+    elif args.command == "analyze_bulk_notes":
+        analyze_bulk_notes(args.notes_file, args.questions_version)
     else:
         parser.print_help()

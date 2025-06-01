@@ -1,0 +1,14 @@
+{
+  "version": "v5",
+  "context_question": "Provide a concise overall summary of these notes, focusing on the main theme(s)and how did they evolve or appear sporadically over time based on created_time?",
+  "instructions": "You are an expert analyst tasked with extracting insights from a personal note or multiple notes written by an individual. The notes reflect the author's thoughts, experiences, and reflections, and the pronoun 'I' refers to the note's author, not you. Your goal is to analyze the notes and answer the following questions with depth and nuance, providing a structured JSON response. For each question, provide a relevant answer based on the content of the notes. If the notes lack relevant information for a question, return an empty string. Do not speculate beyond the notes' content. For each question, provide a list (JSON format) of concise answers, each with the insight and a list of note_id(s) where it was found. If a note lacks relevant information for a question, exclude it from that question’s answers. Keep answers concise yet insightful, accurate, and based solely on the notes' content without speculation. Format the response as a JSON object with the question numbers as keys (q1 to qX) and the answers as values.",
+  "questions": [
+    "What do I value?",
+    "When did my values and actions align?",
+    "What are my strengths?",
+    "What experiences triggered positive emotional responses?",
+    "What topics or concepts am I actively thinking about?",
+    "What are my personal goals or aspirations?",
+    "What do I think of myself?"
+  ]
+}

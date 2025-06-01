@@ -10,7 +10,9 @@ from notion_cli import (
     analyze_notes,
     load_gemini_outputs,
     launch_gui,
-    update_questions
+    update_questions,
+    get_notes_in_timeframe,
+    analyze_bulk_notes
 )
 
 def main():
@@ -56,6 +58,17 @@ def main():
     update_questions_parser.add_argument("--version", type=str, help="Question version to update (default: all versions)")
     update_questions_parser.add_argument("--force", action="store_true", help="Force update even if version already exists in the database")
 
+    # NEW: Get notes in timeframe and analyze with Gemini
+    timeframe_parser = subparsers.add_parser(
+        "get_notes_in_timeframe",
+        help="Get notes within a specific time frame and prepare for Gemini analysis",
+        description="Extract notes created or last updated within a specified time frame and output them as a single JSON file for analysis with Gemini."
+    )
+    timeframe_parser.add_argument("--start_date", type=str, required=True, help="Start date in DD/MM/YYYY format")
+    timeframe_parser.add_argument("--end_date", type=str, help="End date in DD/MM/YYYY format (default: current date)")
+    timeframe_parser.add_argument("--analyze", action="store_true", help="Automatically analyze the collected notes with Gemini")
+    timeframe_parser.add_argument("--questions_version", type=str, help="Question version to use for analysis (default: auto-detect latest)")
+
     args = parser.parse_args()
     if args.command == "reset_db":
         reset_db()
@@ -71,6 +84,10 @@ def main():
             force_update=args.force if hasattr(args, 'force') else False
         )
         print(message)
+    elif args.command == "get_notes_in_timeframe":
+        notes_file = get_notes_in_timeframe(args.start_date, args.end_date)
+        if notes_file and args.analyze:
+            analyze_bulk_notes(notes_file, args.questions_version)
     else:
         parser.print_help()
 
